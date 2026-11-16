@@ -1,0 +1,48 @@
+package com.contastock.erp.api;
+import com.contastock.erp.model.*;import com.contastock.erp.repo.*;
+import org.springframework.web.bind.annotation.*;import org.springframework.http.*;import org.springframework.transaction.annotation.Transactional;
+import java.util.*;import java.math.*;import java.time.*;
+@RestController @RequestMapping("/api") @CrossOrigin(origins={"http://localhost:5173","http://localhost:5174","http://localhost:5175"})
+public class ERPController {
+private final ProductoRepo productos;private final TerceroRepo terceros;private final DocumentoRepo documentos;private final DetalleDocumentoRepo detalles;private final MovimientoRepo movimientos;private final CuentaRepo cuentas;private final AsientoRepo asientos;private final LineaAsientoRepo lineas;
+public ERPController(ProductoRepo p,TerceroRepo t,DocumentoRepo d,DetalleDocumentoRepo dd,MovimientoRepo m,CuentaRepo c,AsientoRepo a,LineaAsientoRepo l){productos=p;terceros=t;documentos=d;detalles=dd;movimientos=m;cuentas=c;asientos=a;lineas=l;}
+private static BigDecimal money(BigDecimal v){return (v==null?BigDecimal.ZERO:v).setScale(2,RoundingMode.HALF_UP);}
+private static void check(boolean ok,String msg){if(!ok)throw new IllegalArgumentException(msg);}
+@GetMapping("/health") public Map<String,String> health(){return Map.of("estado","OK","aplicacion","ContaStock ERP");}
+@GetMapping("/productos") public List<Producto> productos(){return productos.findAll();}
+@PostMapping("/productos") public Producto crearProducto(@RequestBody Producto p){check(p.codigo!=null&&!p.codigo.isBlank()&&p.nombre!=null&&!p.nombre.isBlank(),"Código y nombre obligatorios");check(p.stock!=null&&p.stock==0,"El stock inicial debe ser 0; registra compras para ingresar inventario");check(p.precio!=null&&p.precio.signum()>=0&&p.costo!=null&&p.costo.signum()>=0,"Los precios no pueden ser negativos");p.id=null;p.stock=0;return productos.save(p);}
+@PutMapping("/productos/{id}") public Producto editarProducto(@PathVariable Long id,@RequestBody Producto p){Producto old=productos.findById(id).orElseThrow(()->new IllegalArgumentException("Producto no encontrado"));check(p.nombre!=null&&!p.nombre.isBlank(),"Nombre obligatorio");check(p.precio!=null&&p.precio.signum()>=0&&p.costo!=null&&p.costo.signum()>=0,"Precios inválidos");old.nombre=p.nombre;old.categoria=p.categoria;old.precio=money(p.precio);old.stockMinimo=p.stockMinimo==null?5:p.stockMinimo;old.activo=p.activo;return productos.save(old);}
+@GetMapping("/terceros") public List<Tercero> terceros(){return terceros.findAll();}
+@PostMapping("/terceros") public Tercero crearTercero(@RequestBody Tercero t){check(t.nombre!=null&&!t.nombre.isBlank()&&Set.of("CLIENTE","PROVEEDOR").contains(t.tipo),"Nombre y tipo válidos son obligatorios");t.id=null;return terceros.save(t);}
+@PutMapping("/terceros/{id}") public Tercero editarTercero(@PathVariable Long id,@RequestBody Tercero t){Tercero o=terceros.findById(id).orElseThrow(()->new IllegalArgumentException("Tercero no encontrado"));check(t.nombre!=null&&!t.nombre.isBlank()&&Set.of("CLIENTE","PROVEEDOR").contains(t.tipo),"Nombre y tipo válidos son obligatorios");o.nombre=t.nombre;o.tipo=t.tipo;o.identificacion=t.identificacion;o.correo=t.correo;o.telefono=t.telefono;return terceros.save(o);}
+public record Item(Long productoId,Integer cantidad,BigDecimal precioUnitario){}
+public record NuevoDocumento(String tipo,Long terceroId,String observacion,List<Item> items){}
+@GetMapping("/documentos") public List<Documento> documentos(){return documentos.findAll().stream().sorted(Comparator.comparing((Documento d)->d.id).reversed()).toList();}
+@GetMapping("/documentos/{id}/detalles") public List<DetalleDocumento> detalles(@PathVariable Long id){return detalles.findAll().stream().filter(d->d.documentoId.equals(id)).toList();}
+@GetMapping("/movimientos") public List<Movimiento> movimientos(){return movimientos.findAll().stream().sorted(Comparator.comparing((Movimiento m)->m.id).reversed()).toList();}
+@GetMapping("/cuentas") public List<Cuenta> cuentas(){return cuentas.findAll().stream().sorted(Comparator.comparing(c->c.codigo)).toList();}
+@GetMapping("/asientos") public List<Asiento> asientos(){return asientos.findAll().stream().sorted(Comparator.comparing((Asiento a)->a.id).reversed()).toList();}
+@GetMapping("/asientos/{id}/lineas") public List<LineaAsiento> lineas(@PathVariable Long id){return lineas.findAll().stream().filter(l->l.asientoId.equals(id)).toList();}
+private void linea(Asiento a,String codigo,BigDecimal debe,BigDecimal haber){Cuenta c=cuentas.findAll().stream().filter(x->x.codigo.equals(codigo)).findFirst().orElseThrow();LineaAsiento l=new LineaAsiento();l.asientoId=a.id;l.cuentaCodigo=codigo;l.cuentaNombre=c.nombre;l.debe=money(debe);l.haber=money(haber);lineas.save(l);}
+@Transactional @PostMapping("/documentos") public Documento registrar(@RequestBody NuevoDocumento req){
+check(req!=null&&Set.of("COMPRA","VENTA").contains(req.tipo()),"Tipo de documento inválido");check(req.items()!=null&&!req.items().isEmpty(),"Agrega al menos un producto");
+Tercero tercero=terceros.findById(req.terceroId()==null?-1L:req.terceroId()).orElseThrow(()->new IllegalArgumentException("Selecciona un cliente o proveedor"));
+check(tercero.tipo.equals(req.tipo().equals("COMPRA")?"PROVEEDOR":"CLIENTE"),"El tercero no corresponde al tipo de operación");
+Set<Long> ids=new HashSet<>();BigDecimal total=BigDecimal.ZERO,costoTotal=BigDecimal.ZERO;
+List<Producto> pp=new ArrayList<>();List<BigDecimal> subtotales=new ArrayList<>();List<BigDecimal> costos=new ArrayList<>();
+for(Item it:req.items()){check(it.productoId()!=null&&it.cantidad()!=null&&it.cantidad()>0,"Producto y cantidad positiva obligatorios");check(ids.add(it.productoId()),"No repitas productos en el mismo documento");Producto p=productos.findById(it.productoId()).orElseThrow(()->new IllegalArgumentException("Producto no encontrado"));check(p.activo,"Producto inactivo: "+p.nombre);
+BigDecimal precio=money(it.precioUnitario());check(precio.signum()>0,"El precio unitario debe ser mayor a cero");if(req.tipo().equals("VENTA"))check(p.stock>=it.cantidad(),"Stock insuficiente para "+p.nombre);
+BigDecimal subtotal=precio.multiply(BigDecimal.valueOf(it.cantidad()));BigDecimal costo=money(p.costo).multiply(BigDecimal.valueOf(it.cantidad()));total=total.add(subtotal);costoTotal=costoTotal.add(costo);pp.add(p);subtotales.add(subtotal);costos.add(costo);
+}
+Documento d=new Documento();d.tipo=req.tipo();d.terceroId=tercero.id;d.terceroNombre=tercero.nombre;d.observacion=req.observacion();d.total=money(total);d.costoTotal=req.tipo().equals("VENTA")?money(costoTotal):BigDecimal.ZERO;d=documentos.save(d);
+for(int i=0;i<pp.size();i++){Producto p=pp.get(i);Item it=req.items().get(i);BigDecimal precio=money(it.precioUnitario());DetalleDocumento dd=new DetalleDocumento();dd.documentoId=d.id;dd.productoId=p.id;dd.productoNombre=p.nombre;dd.cantidad=it.cantidad();dd.precioUnitario=precio;dd.subtotal=subtotales.get(i);detalles.save(dd);
+Movimiento m=new Movimiento();m.productoId=p.id;m.productoNombre=p.nombre;m.documentoId=d.id;m.tipo=d.tipo.equals("COMPRA")?"ENTRADA":"SALIDA";m.cantidad=it.cantidad();
+if(d.tipo.equals("COMPRA")){BigDecimal valorPrevio=money(p.costo).multiply(BigDecimal.valueOf(p.stock));int nuevoStock=p.stock+it.cantidad();p.costo=valorPrevio.add(subtotales.get(i)).divide(BigDecimal.valueOf(nuevoStock),2,RoundingMode.HALF_UP);p.stock=nuevoStock;}else p.stock-=it.cantidad();m.saldo=p.stock;productos.save(p);movimientos.save(m);
+}
+Asiento a=new Asiento();a.documentoId=d.id;a.concepto=d.tipo+" #"+d.id+" - "+tercero.nombre;a.debe=d.tipo.equals("VENTA")?d.total.add(d.costoTotal):d.total;a.haber=a.debe;a=asientos.save(a);
+if(d.tipo.equals("COMPRA")){linea(a,"1.1.03",d.total,BigDecimal.ZERO);linea(a,"2.1.01",BigDecimal.ZERO,d.total);}else{linea(a,"1.1.02",d.total,BigDecimal.ZERO);linea(a,"4.1.01",BigDecimal.ZERO,d.total);linea(a,"5.1.01",d.costoTotal,BigDecimal.ZERO);linea(a,"1.1.03",BigDecimal.ZERO,d.costoTotal);}
+return d;
+}
+@GetMapping("/reportes/resumen") public Map<String,Object> resumen(){List<Producto> ps=productos.findAll();List<Documento> ds=documentos.findAll();BigDecimal compras=BigDecimal.ZERO,ventas=BigDecimal.ZERO,costoVentas=BigDecimal.ZERO,valorInventario=BigDecimal.ZERO;int unidades=0,bajo=0;for(Producto p:ps){unidades+=p.stock;if(p.stock<=p.stockMinimo)bajo++;valorInventario=valorInventario.add(money(p.costo).multiply(BigDecimal.valueOf(p.stock)));}for(Documento d:ds){if(d.tipo.equals("COMPRA"))compras=compras.add(d.total);else{ventas=ventas.add(d.total);costoVentas=costoVentas.add(d.costoTotal);}}Map<String,Object> r=new LinkedHashMap<>();r.put("productos",ps.size());r.put("unidades",unidades);r.put("stockBajo",bajo);r.put("valorInventario",money(valorInventario));r.put("compras",money(compras));r.put("ventas",money(ventas));r.put("costoVentas",money(costoVentas));r.put("utilidadBruta",money(ventas.subtract(costoVentas)));r.put("documentos",ds.size());return r;}
+@GetMapping("/reportes/balance") public List<Map<String,Object>> balance(){List<Map<String,Object>> out=new ArrayList<>();for(Cuenta c:cuentas.findAll().stream().sorted(Comparator.comparing(x->x.codigo)).toList()){BigDecimal debe=BigDecimal.ZERO,haber=BigDecimal.ZERO;for(LineaAsiento l:lineas.findAll()){if(c.codigo.equals(l.cuentaCodigo)){debe=debe.add(l.debe);haber=haber.add(l.haber);}}Map<String,Object> r=new LinkedHashMap<>();r.put("codigo",c.codigo);r.put("nombre",c.nombre);r.put("tipo",c.tipo);r.put("debe",money(debe));r.put("haber",money(haber));r.put("saldoDeudor",money(debe.subtract(haber).max(BigDecimal.ZERO)));r.put("saldoAcreedor",money(haber.subtract(debe).max(BigDecimal.ZERO)));out.add(r);}return out;}
+}
